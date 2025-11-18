@@ -2,7 +2,7 @@ import json
 from flask import Flask, request, jsonify
 from agent_workflow import build_agent_workflow, CampaignState
 from typing import Dict, Any
-from rag_utils import add_document_to_chroma, query_chroma, get_all_documents_from_chroma, update_document_in_chroma, delete_document_from_chroma, get_or_create_collection
+from rag_utils import add_document_to_chroma, query_chroma, get_all_documents_from_chroma, update_document_in_chroma, delete_document_from_chroma, get_or_create_collection, get_document_by_id
 from rag_utils import collection 
 
 app = Flask(__name__)
@@ -139,6 +139,8 @@ def handle_knowledge():
                 metadata_to_add['title'] = data['title']
             if 'source_type' in data:
                 metadata_to_add['source_type'] = data['source_type']
+            if 'registration_date' in data: # registration_date 추가
+                metadata_to_add['registration_date'] = data['registration_date']
 
             id_to_add = f"campaign-{campaign_id}"
 
@@ -166,12 +168,14 @@ def handle_knowledge():
             if 'custom_columns' in details and isinstance(details['custom_columns'], list):
                 details['custom_columns'] = ', '.join(details['custom_columns'])
 
-            doc_to_add = f"성공적인 캠페인 사례 (ID: {campaign_id}): {summary}"
+            doc_to_add = summary
             metadata_to_add = {
                 "campaign_id": campaign_id,
                 "status": "successful",
                 **details
             }
+            if 'registration_date' in data: # registration_date 추가
+                metadata_to_add['registration_date'] = data['registration_date']
             id_to_add = f"campaign-{campaign_id}"
 
             add_document_to_chroma(
@@ -217,6 +221,21 @@ def get_all_knowledge():
         return jsonify({"knowledge_base": all_documents}), 200
     except Exception as e:
         print(f"Error retrieving all documents from Chroma DB: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/knowledge/<string:doc_id>', methods=['GET'])
+def get_knowledge_by_id(doc_id):
+    """
+    ChromaDB에 저장된 특정 지식 문서를 ID로 조회합니다.
+    """
+    try:
+        document = get_document_by_id(doc_id)
+        if document:
+            return jsonify(document), 200
+        else:
+            return jsonify({"error": f"Document with ID '{doc_id}' not found."}), 404
+    except Exception as e:
+        print(f"Error retrieving document from Chroma DB by ID: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/knowledge/<string:doc_id>', methods=['PUT'])
