@@ -1,4 +1,6 @@
 import json
+import math
+from datetime import datetime
 from flask import Flask, request, jsonify
 from agent_workflow import build_agent_workflow, CampaignState
 from typing import Dict, Any
@@ -214,13 +216,40 @@ def handle_knowledge():
 @app.route('/api/knowledge', methods=['GET'])
 def get_all_knowledge():
     """
-    ChromaDB에 저장된 모든 지식을 조회합니다.
+    ChromaDB에 저장된 모든 지식을 페이지네이션으로 조회합니다.
+    Query Parameters:
+        - page (int): 조회할 페이지 번호 (기본값: 1)
+        - size (int): 한 페이지에 포함할 문서 수 (기본값: 10)
     """
     try:
+        # 쿼리 파라미터에서 page와 size를 가져옵니다.
+        page = request.args.get('page', 1, type=int)
+        size = request.args.get('size', 10, type=int)
+
+        # 페이지 번호가 1보다 작을 경우 1로 보정합니다.
+        if page < 1:
+            page = 1
+
         all_documents = get_all_documents_from_chroma()
-        return jsonify({"knowledge_base": all_documents}), 200
+        total_documents = len(all_documents)
+        total_pages = math.ceil(total_documents / size) if size > 0 else 0
+
+        # 페이지네이션을 위한 슬라이싱
+        start_index = (page - 1) * size
+        end_index = start_index + size
+        paginated_docs = all_documents[start_index:end_index]
+
+        # 최종 응답 구성
+        response = {
+            "total_documents": total_documents,
+            "total_pages": total_pages,
+            "current_page": page,
+            "page_size": size,
+            "data": paginated_docs
+        }
+        return jsonify(response), 200
     except Exception as e:
-        print(f"Error retrieving all documents from Chroma DB: {e}")
+        print(f"Error retrieving all documents from Chroma DB with pagination: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/knowledge/<string:doc_id>', methods=['GET'])
@@ -252,6 +281,9 @@ def update_knowledge(doc_id):
 
     if not document or not metadata:
         return jsonify({"error": "Missing 'document' or 'metadata' in request body."}), 400
+
+    # updated_at 필드를 현재 시간으로 추가 또는 업데이트
+    metadata['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
         update_document_in_chroma(doc_id, document, metadata)

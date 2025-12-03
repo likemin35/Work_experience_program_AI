@@ -94,6 +94,7 @@ def run_targeting_agent(state: CampaignState) -> Dict:
         - `target_group_index`: 1부터 5까지의 순서 번호.
         - `target_name`: 페르소나를 대표하는 이름 (예: '20대 초반 대학생', '30대 직장인').
         - `target_features`: 페르소나의 상세 특징, 니즈, 라이프스타일.
+        - `classification_reason`: 왜 이 페르소나를 해당 프로모션의 타겟으로 선정했는지에 대한 명확하고 설득력 있는 이유.
 
         결과는 반드시 아래 JSON 형식의 단일 객체로 반환해야 합니다.
         {{
@@ -101,7 +102,8 @@ def run_targeting_agent(state: CampaignState) -> Dict:
                 {{
                     "target_group_index": 1,
                     "target_name": "...",
-                    "target_features": "..."
+                    "target_features": "...",
+                    "classification_reason": "..."
                 }},
                 ... 4 more personas
             ]
@@ -140,9 +142,23 @@ def run_messaging_agent(state: CampaignState) -> Dict:
     target_personas = state.get('target_personas', [])
     rework_count = state.get('rework_count', 0)
     validator_feedback = state.get('validator_feedback', None)
-    refine_feedback = state.get('refine_feedback', None) # 마케터 피드백 추가
-    core_benefit_text = input_data.get('core_benefit_text', '기본 혜택')
-    custom_columns = input_data.get('custom_columns', ['[이름]', '[핸드폰기종]', '[사용년도]'])
+    refine_feedback = state.get('refine_feedback', None)  # 마케터 피드백 추가
+    core_benefit_text = input_data.get('coreBenefitText', '기본 혜택')  # 'coreBenefitText'로 수정
+    custom_columns_data = input_data.get('customColumns', {})  # 'customColumns'로 수정하고 객체로 받음
+    source_urls = input_data.get('sourceUrls', []) # sourceUrls 추가
+    source_urls_str = ", ".join(source_urls) if source_urls else '없음'
+
+    # 새로운 customColumns 형식(객체)을 LLM이 이해하기 좋은 문자열로 변환
+    if isinstance(custom_columns_data, dict):
+        columns_list = []
+        for key, value in custom_columns_data.items():
+            # 키는 그대로 사용하고, 값은 예시 또는 타입으로 설명
+            columns_list.append(f"- `{{{key}}}`: ({value})")
+        columns_for_prompt = "\n".join(columns_list)
+    else:
+        # 기존 형식(리스트) 또는 기본값 처리
+        columns_for_prompt = ", ".join(custom_columns_data)
+
 
     # LLM 프롬프트 정의
     prompt = ChatPromptTemplate.from_messages([
@@ -151,6 +167,10 @@ def run_messaging_agent(state: CampaignState) -> Dict:
         주어진 타겟 페르소나의 특징을 명확히 언급하고, 제공된 커스텀 컬럼을 **반드시 1개 이상 활용**하여
         고객이 '나만을 위한 메시지'라고 느끼도록 **2개의 서로 다른 초안**을 작성하십시오.
         참고용 RAG 지식(성공 사례)을 활용하여 효과적인 문구를 구성하세요.
+
+        **중요**:
+        1. 메시지 본문에는 `{{parameter}}` 와 같이 실제 데이터로 채워질 파라미터를 사용해야 합니다. 예: `{{이름}}님, {{관심_카테고리}} 신상품이 입고되었습니다!`
+        2. 제공된 '포함해야 할 URL'을 메시지 내용에 자연스럽게 포함시키거나, 메시지 마지막에 '자세히 보기: [URL]' 형식으로 추가해야 합니다.
 
         {feedback_instructions}
 
@@ -172,7 +192,9 @@ def run_messaging_agent(state: CampaignState) -> Dict:
         타겟 페르소나 이름: {target_name}
         타겟 페르소나 특징: {target_features}
         프로모션 핵심 혜택: {core_benefit}
-        사용 가능한 커스텀 컬럼: {columns}
+        사용 가능한 커스텀 컬럼과 설명:
+        {columns}
+        포함해야 할 URL: {source_urls}
         참고용 RAG 지식 (성공 사례): {rag_knowledge}
         {feedback_section}
 
@@ -195,11 +217,11 @@ def run_messaging_agent(state: CampaignState) -> Dict:
         # 피드백 처리
         feedback_instructions = ""
         feedback_section = ""
-        if refine_feedback: # 마케터의 피드백을 최우선으로 반영
+        if refine_feedback:  # 마케터의 피드백을 최우선으로 반영
             print(f"Messaging Agent - Marketer's Refine Feedback 반영 중: {refine_feedback}")
             feedback_instructions = "이전 초안에 대한 아래의 마케터 피드백을 반영하여 메시지를 수정해주세요."
             feedback_section = f"마케터 수정 피드백: {refine_feedback.get('details', '없음')}"
-        elif validator_feedback: # 마케터 피드백이 없을 경우, Validator 피드백 반영
+        elif validator_feedback:  # 마케터 피드백이 없을 경우, Validator 피드백 반영
             print(f"Messaging Agent - Validator Feedback 반영 중: {validator_feedback}")
             feedback_instructions = "이전 초안에 대한 아래의 피드백을 반영하여 메시지를 수정해주세요."
             feedback_section = f"수정 피드백: {validator_feedback.get('details', '없음')}"
@@ -211,7 +233,8 @@ def run_messaging_agent(state: CampaignState) -> Dict:
             "target_name": target_name,
             "target_features": target_features,
             "core_benefit": core_benefit_text,
-            "columns": ", ".join(custom_columns),
+            "columns": columns_for_prompt,
+            "source_urls": source_urls_str,
             "rag_knowledge": success_case_knowledge,
             "feedback_section": feedback_section
         })
@@ -233,7 +256,7 @@ def run_validator_agent(state: CampaignState) -> Dict:
     """
     print("---" + " Validator Agent 실행 중 ---")
     messages_drafts = state.get('messages_drafts', [])
-    core_benefit_text = state.get('input_data', {}).get('core_benefit_text', '')
+    core_benefit_text = state.get('input_data', {}).get('coreBenefitText', '')
 
     # LLM 프롬프트 정의
     prompt = ChatPromptTemplate.from_messages([
@@ -316,14 +339,54 @@ def run_validator_agent(state: CampaignState) -> Dict:
 def run_formatter_agent(state: CampaignState) -> Dict:
     """
     Formatter Agent: 최종 결과를 통합하여 BE 서버로 전달할 JSON 형태로 포맷팅합니다.
+    이 버전에서는 타겟 페르소나, 메시지 초안, 검증 리포트를 모두 결합합니다.
     """
     print("---" + " Formatter Agent 실행 중 ---")
-    # BE API 명세에 맞춰 'messages_drafts'를 최종 결과로 포맷팅합니다.
-    # 이것이 BE가 기대하는 'target_groups' 리스트가 됩니다.
-    final_result = state.get('messages_drafts')
-    
-    print(f"Formatter Agent - 최종 결과 (messages_drafts): {final_result}")
-    return {"final_output": final_result} # 최종 결과는 'final_output' 키로 반환
+    target_personas = state.get('target_personas', [])
+    messages_drafts = state.get('messages_drafts', [])
+    validation_reports = state.get('validation_reports', [])
+
+    # 빠른 조회를 위해 리포트와 초안을 맵으로 변환합니다.
+    report_map = {}
+    if validation_reports:
+        for report in validation_reports:
+            key = (report['target_group_index'], report['message_draft_index'])
+            report_map[key] = report
+
+    draft_map = {}
+    if messages_drafts:
+        for group in messages_drafts:
+            draft_map[group['target_group_index']] = group['message_drafts']
+
+    # 페르소나를 기준으로 초안과 검증 리포트를 결합합니다.
+    final_target_groups = []
+    if target_personas:
+        for persona in target_personas:
+            group_index = persona['target_group_index']
+            drafts_for_group = draft_map.get(group_index, [])
+            
+            new_drafts = []
+            for draft in drafts_for_group:
+                key = (group_index, draft['message_draft_index'])
+                report_for_draft = report_map.get(key)
+                
+                new_draft_entry = {
+                    "message_draft_index": draft['message_draft_index'],
+                    "message_text": draft['message_text'],
+                    "validation_report": report_for_draft
+                }
+                new_drafts.append(new_draft_entry)
+            
+            final_target_groups.append({
+                "target_group_index": group_index,
+                "target_name": persona['target_name'],
+                "target_features": persona['target_features'],
+                "classification_reason": persona.get('classification_reason', 'N/A'), # 이유 필드 추가
+                "message_drafts": new_drafts
+            })
+
+    print(f"Formatter Agent - 최종 결합 결과: {final_target_groups}")
+    return {"final_output": final_target_groups}
 
 # 3. LangGraph 조건부 루프: decide_next_step 함수
 def decide_next_step(state: CampaignState) -> str:
@@ -336,8 +399,8 @@ def decide_next_step(state: CampaignState) -> str:
     validation_reports = state.get('validation_reports', [])
     validator_feedback = state.get('validator_feedback', None)
 
-    # 최대 재시도 횟수 (2회) 초과 시 강제 종료
-    if rework_count >= 2:
+    # 최대 재시도 횟수 (1회) 초과 시 강제 종료
+    if rework_count >= 1:
         print(f"재시도 횟수 {rework_count}회 초과. Formatter로 이동하여 강제 종료.")
         return "formatter"
 
