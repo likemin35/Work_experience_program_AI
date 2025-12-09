@@ -216,8 +216,10 @@ def handle_knowledge():
 @app.route('/api/knowledge', methods=['GET'])
 def search_or_list_knowledge():
     """
-    URL 쿼리 파라미터를 사용하여 ChromaDB의 지식을 검색하거나 조회합니다.
+    URL 쿼리 파라미터를 사용하여 ChromaDB의 지식을 검색, 정렬, 조회합니다.
     - 'q': 의미 검색(semantic search)
+    - 'sort_by': 정렬 기준 필드 (예: 'registration_date', 'updated_at')
+    - 'sort_order': 정렬 순서 ('asc' 또는 'desc', 기본값: 'desc')
     - '[key]__contains=[value]': 메타데이터 'key'에 'value'가 포함된 문서 검색
     - '[key]=[value]': 메타데이터 'key'가 'value'와 정확히 일치하는 문서 검색
 
@@ -226,13 +228,15 @@ def search_or_list_knowledge():
         - n_results (int, optional): 'q' 사용 시 반환할 최대 결과 수 (기본값: 5).
         - page (int, optional): 'q'가 없을 때 조회할 페이지 번호 (기본값: 1).
         - size (int, optional): 'q'가 없을 때 한 페이지에 포함할 문서 수 (기본값: 10).
+        - sort_by (str, optional): 정렬 기준이 될 메타데이터 필드.
+        - sort_order (str, optional): 'asc' 또는 'desc'로 정렬 순서 지정.
     """
     try:
         args = request.args
         search_query = args.get('q')
 
-        # 1. 필터 조건 분리: exact_match vs contains
-        reserved_keys = ['q', 'n_results', 'page', 'size']
+        # 1. 필터 및 정렬 조건 분리
+        reserved_keys = ['q', 'n_results', 'page', 'size', 'sort_by', 'sort_order']
         exact_filter_conditions = []
         contains_filters = {}
         
@@ -256,21 +260,20 @@ def search_or_list_knowledge():
         elif len(exact_filter_conditions) > 1:
             where_filter = {"$and": exact_filter_conditions}
 
-        # 3. 'q' 파라미터가 있는 경우: 의미 검색 후 후처리 필터링
+        # 3. 'q' 파라미터가 있는 경우: 의미 검색 후 후처리
         if search_query:
             n_results = args.get('n_results', 5, type=int)
             
-            # 의미 검색 실행 (정확 일치 필터만 적용)
-            # contains 필터를 위해 더 많은 결과를 요청할 수 있습니다. (예: n_results * 5)
+            # 의미 검색 실행 (후처리를 위해 더 많은 결과 요청)
             results = query_chroma(
                 query_texts=[search_query],
-                n_results=n_results * 5, 
+                n_results=n_results * 10,  # 정렬 및 필터링을 위해 더 많은 결과 요청
                 where_filter=where_filter
             )
 
             # 후처리: 'contains' 필터 적용
             if contains_filters:
-                final_results = []
+                filtered_results = []
                 for doc in results:
                     all_match = True
                     for key, value in contains_filters.items():
@@ -278,12 +281,23 @@ def search_or_list_knowledge():
                             all_match = False
                             break
                     if all_match:
-                        final_results.append(doc)
-                results = final_results[:n_results]
+                        filtered_results.append(doc)
+                results = filtered_results
 
-            return jsonify({"results": results}), 200
+            # 후처리: 정렬 적용
+            sort_by = args.get('sort_by')
+            if sort_by:
+                sort_order = args.get('sort_order', 'desc').lower()
+                results.sort(
+                    key=lambda d: d.get('metadata', {}).get(sort_by, ''),
+                    reverse=(sort_order == 'desc')
+                )
 
-        # 4. 'q' 파라미터가 없는 경우: 전체 목록 조회 후 후처리 필터링
+            # 최종 결과 n_results 만큼 반환
+            final_results = results[:n_results]
+            return jsonify({"results": final_results}), 200
+
+        # 4. 'q' 파라미터가 없는 경우: 전체 목록 조회 후 처리
         else:
             # DB에서 정확 일치 필터로 문서 조회
             all_documents = get_all_documents_from_chroma(where_filter=where_filter)
@@ -300,6 +314,16 @@ def search_or_list_knowledge():
                     if all_match:
                         filtered_documents.append(doc)
                 all_documents = filtered_documents
+            
+            # 후처리: 정렬 적용
+            sort_by = args.get('sort_by')
+            if sort_by:
+                sort_order = args.get('sort_order', 'desc').lower()
+                # 날짜/시간 문자열을 직접 비교하여 정렬
+                all_documents.sort(
+                    key=lambda d: d.get('metadata', {}).get(sort_by, ''),
+                    reverse=(sort_order == 'desc')
+                )
 
             # 페이지네이션 적용
             page = args.get('page', 1, type=int)
@@ -318,7 +342,7 @@ def search_or_list_knowledge():
                 "total_pages": total_pages,
                 "current_page": page,
                 "page_size": size,
-                "filters": {"exact": where_filter, "contains": contains_filters},
+                "filters": {"exact": where_filter, "contains": contains_filters, "sort": {"by": sort_by, "order": args.get('sort_order')}},
                 "data": paginated_docs
             }
             return jsonify(response), 200
