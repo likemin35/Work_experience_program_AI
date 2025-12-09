@@ -30,7 +30,9 @@ def run_workflow():
     # CampaignState의 input_data 필드에 해당하는 데이터를 추출합니다.
     # 클라이언트로부터 받은 JSON 데이터가 곧 input_data가 됩니다.
     initial_input_data = data
-
+    print("=== DEBUG: input_data received by AI server ===")
+    print(json.dumps(initial_input_data, ensure_ascii=False, indent=2))
+    print("================================================")
     # LangGraph 워크플로우의 초기 상태를 설정합니다.
     # rework_count 등은 워크플로우 내부에서 관리되므로 초기에는 기본값으로 설정합니다.
     initial_state: CampaignState = {

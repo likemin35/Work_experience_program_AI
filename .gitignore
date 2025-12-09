@@ -11,5 +11,8 @@ venv
 # ChromaDB 로컬 데이터
 chroma_data/
 
+# ChromaDB 로컬 데이터2
+chroma_target/
+
 # 환경 변수 파일
 .env
