@@ -30,7 +30,6 @@ class CampaignState(TypedDict):
     messages_drafts: Union[List[Dict], None] # Messaging Agent의 타겟별 초안 2개 생성 결과
     validation_reports: Union[List[Dict], None] # Validator Agent의 초안 검증 리포트
     rework_count: int # 메시지 재생성 시도 횟수 (무한 루프 방지용)
-    validator_feedback: Union[Dict, None] # Validator가 Messaging Agent에게 전달할 구체적인 수정 피드백
     refine_feedback: Union[Dict, None] # 마케터의 재요청 피드백
     final_output: Union[Dict, None] # Formatter Agent의 최종 결과
 
@@ -96,7 +95,7 @@ def rag_search_targeting(query: str) -> str:
 
 # LLM, Parser, Prompt 등 공통 컴포넌트 초기화
 # 참고: OpenAI API 키는 환경변수 'OPENAI_API_KEY'에 설정되어 있어야 합니다.
-llm = ChatOpenAI(model="gpt-4-turbo", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
+llm = ChatOpenAI(model="gpt-4-turbo", temperature=0.5, api_key=os.getenv("OPENAI_API_KEY"))
 json_parser = JsonOutputParser()
 
 def run_targeting_agent(state: CampaignState) -> Dict:
@@ -193,159 +192,199 @@ def run_targeting_agent(state: CampaignState) -> Dict:
 
 def run_messaging_agent(state: CampaignState) -> Dict:
     print("--- Messaging Agent 실행 중 ---")
+    # 상태에서 필요한 데이터 추출
     input_data = state.get('input_data', {})
     target_personas = state.get('target_personas', [])
     rework_count = state.get('rework_count', 0)
-    validator_feedback = state.get('validator_feedback', None)
+    validation_reports = state.get('validation_reports')
     refine_feedback = state.get('refine_feedback', None)
 
+    # 공통으로 사용될 데이터 구성
     core_benefit_text = input_data.get('coreBenefitText', '기본 혜택')
     custom_columns_data = input_data.get('customColumns', {})
     source_urls = input_data.get('sourceUrls', [])
     source_urls_str = ", ".join(source_urls) if source_urls else '없음'
 
-    # customColumns 문자열 변환
     if isinstance(custom_columns_data, dict):
-        columns_list = []
-        for key, value in custom_columns_data.items():
-            columns_list.append(f"- `{{{key}}}`: ({value})")
+        columns_list = [f"- `{{{k}}}`: ({v})" for k, v in custom_columns_data.items()]
         columns_for_prompt = "\n".join(columns_list)
     else:
         columns_for_prompt = ", ".join(custom_columns_data)
 
-    # ================================
-    # 🔥 coreBenefitText를 실제로 주입하는 system 프롬프트 추가
-    # ================================
+    # 새로운 프롬프트: 단계적 사고(Chain-of-Thought)와 듀얼 RAG 적용
     prompt = ChatPromptTemplate.from_messages([
-        (
-        "system",
-        """
+        ("system",
+         """
         당신은 고객의 감정을 움직이는 초개인화 마케팅 메시지 전문 카피라이터입니다.
-        아래 규칙에 따라 타겟 페르소나에게 맞춘 메시지 초안을 2개 생성합니다.
+        아래의 3단계 프로세스를 엄격히 따라서, 주어진 타겟 페르소나를 위한 메시지 초안 2개를 생성해야 합니다.
 
-        ----------------------------------------------------------------
-        [‼ 매우 중요: 실제 프로모션 혜택 전체 텍스트]
-        ----------------------------------------------------------------
-        아래는 이번 프로모션에서 실제로 제공되는 혜택 전체입니다.
-        이 내용을 단 하나도 빠짐없이 본문에 모두 반영해야 합니다.
+        ---
+        **[1단계: 분석 및 전략 수립]**
 
-        <coreBenefitText>
-        {core_benefit}
-        </coreBenefitText>
+        먼저, 주어진 모든 정보(페르소나, 핵심 혜택, RAG 지식)를 종합적으로 분석하고, 각 초안에 대한 생성 전략을 머릿속으로 구체적으로 수립합니다.
+        아래 <생각 예시>는 당신의 사고 과정을 돕기 위한 참고 자료일 뿐, **이 내용을 그대로 모방하거나 실제 생성 메시지에 사용해서는 안 됩니다.**
 
-        ----------------------------------------------------------------
-        [1] 메시지 전체 구조
-        ----------------------------------------------------------------
+        <생각 예시>
+        1.  **페르소나 분석**: 타겟은 '20대 기술에 민감한 대학생'. 가격에 민감하지만 최신 기술 경험을 중시함.
+        2.  **RAG 지식 분석**: 성공 사례를 보니, 이 그룹은 명확한 숫자 비교와 직접적인 화법에 반응이 좋음. 실패 사례에서는 유치한 이모티콘과 전문 용어 남발을 싫어하는 경향이 나타남.
+        3.  **초안 1 (실속형) 전략**: '50% 할인'과 '2배 빠른 속도'라는 혜택의 숫자를 전면에 내세운다. 과장된 표현 없이 간결하고 직설적인 톤으로 작성한다.
+        4.  **초안 2 (감정형) 전략**: '남들보다 앞서가는 경험', '친구들 사이에서 돋보이는 최신 기기'라는 자부심을 자극한다. 좀 더 트렌디하고 세련된 톤으로 작성한다.
+        </생각 예시>
 
-        ① **오프닝 문장 (띵동 문구)**
-        - 오직 “핵심혜택요약”만 사용하여 1문장으로 표현합니다.
-        - 예: "띵동📦 {{고객이름}} 고객님께 {{핵심혜택요약}}이 도착했습니다!"
+        ---
+        **[2단계: 메시지 초안 작성]**
 
-        ---------------------------------------------------------------
+        위에서 수립한 전략에 따라, 아래 규칙을 준수하여 메시지 초안 2개를 작성합니다.
 
-        ② **본문 – coreBenefitText(프로모션 상세 내용)를 100% 기반으로 재작성**
-        - 반드시 위 <coreBenefitText> 안의 모든 내용을 사용해 본문 작성
-        - 어떤 항목도 생략/삭제/변경 금지
-        - “예시 구조”는 참고일 뿐이며 예시 텍스트는 출력 금지
+        *   **핵심 혜택 반영**: `<coreBenefitText>` 안의 모든 내용을 어떤 항목도 생략/삭제/변경 없이 본문에 자연스럽게 포함해야 합니다.
+        *   **메시지 구조**: [오프닝] - [본문] - [프로모션 기간] - [CTA] 순서를 따릅니다.
+        *   **피드백 반영**: 수정 피드백이 있다면, 반드시 해당 내용을 반영하여 작성합니다.
+        *   **초안별 규칙**:
 
-        본문 구성 규칙:
-        1) coreBenefitText의 전체 내용을 전부 출력하기 
-        2) 내부의 모든 구성 요소를 자연스럽게 포함  
-        3) 페르소나의 특징을 반영하여 2~3문장 설명 추가  
-        4) 마케터 제공 전략이 있다면 자연스럽게 포함  
+            -   **[초안 1: 실속형 메시지]**
+                -   **목적**: 고객이 얻는 금전적, 기능적 이득을 명확히 인지시키는 것.
+                -   **핵심 규칙**:
+                    -   첫 문장은 반드시 할인율, 포인트, 금액 등 **숫자로 표현된 혜택**으로 시작해야 합니다.
+                    -   본문에는 '~만', '~부터', '~까지' 등 **범위나 한정을 나타내는 표현**을 사용하여 혜택의 구체성을 더하세요.
+                    -   감성적이거나 추상적인 표현(예: '특별한 경험', '놀라운')은 **절대 사용하지 마세요.**
 
-        ---------------------------------------------------------------
+            -   **[초안 2: 감정형 메시지]**
+                -   **목적**: 해당 상품/서비스가 고객의 삶에 가져올 긍정적인 감정이나 변화를 그려주는 것.
+                -   **핵심 규칙**:
+                    -   첫 문장은 반드시 고객의 상황이나 감정에 공감하는 **질문**으로 시작해야 합니다. (예: "요즘 부쩍 지쳐 보인다는 말을 듣지 않으셨나요?")
+                    -   '선물', '나를 위한', '당신만의' 등 **개인화되고 감성적인 키워드**를 2개 이상 사용하세요.
+                    -   할인율, 포인트 등 **숫자로 된 혜택을 직접적으로 언급하는 것을 피하세요.** (혜택 자체는 설명하되, 숫자는 제외)
 
-        ③ [프로모션 기간] → coreBenefitText에서 직접 찾아 사용
+        *   **[!!!]** 위 규칙에 따라 두 초안의 내용과 구조는 눈에 띄게 달라야 하며, 서로 조금이라도 비슷하게 작성될 경우 생성은 실패한 것으로 간주합니다.
 
-        ---------------------------------------------------------------
+        ---
+        **[3단계: 최종 출력]**
 
-        ④ **URL 제공 시 CTA**
-        - “👉 자세히 보기: {source_urls}”
-
-        ---------------------------------------------------------------
-
-        ⑤ 커스텀 변수 활용
-        - 이름 등 최소 1개는 본문에서 사용
-
-        ---------------------------------------------------------------
-        [2] 초안 작성 규칙
-        ---------------------------------------------------------------
-        - 두 개 초안은 서로 다른 톤으로 작성
-        - {feedback_instructions}
-
-        ---------------------------------------------------------------
-        [3] 출력(JSON)
-        ---------------------------------------------------------------
-
+        생성된 메시지를 반드시 아래 JSON 형식에 맞춰 최종 출력합니다. 그 어떤 추가 설명도 붙이지 마세요.
         {{
         "drafts": [
             {{
                 "message_draft_index": 1,
-                "message_text": "(전체 메시지 텍스트)"
+                "message_text": "(실속형으로 작성된 전체 메시지 텍스트)"
             }},
             {{
                 "message_draft_index": 2,
-                "message_text": "(전체 메시지 텍스트)"
+                "message_text": "(감정형으로 작성된 전체 메시지 텍스트)"
             }}
         ]
         }}
-
-        ----------------------------------------------------------------
-        [출력 포맷 규칙]
-        ----------------------------------------------------------------
-        ① 오프닝  
-        ② 소개  
-        ③ [제공 혜택] – coreBenefitText 기반  
-        ④ [이런 고객님께 추천] – 페르소나 기반  
-        ⑤ [프로모션 기간]  
-        ⑥ [URL]  
         """
-        )
+         )
     ])
-
     chain = prompt | llm | json_parser
 
-    messages_drafts = []
-    for persona in target_personas:
-        target_name = persona['target_name']
-        target_features = persona['target_features']
+    # 헬퍼 함수: RAG 검색 및 포맷팅
+    def get_rag_knowledge_for_persona(target_name: str) -> str:
+        success_query = f"{target_name} 타겟 메시지 성공 사례"
+        failure_query = f"{target_name} 타겟 메시지 실패 사례"
+        
+        success_knowledge = rag_search(query=success_query, source_type='성공 사례')
+        failure_knowledge = rag_search(query=failure_query, source_type='실패 사례')
+        
+        return f"[참고할 성공 사례]\n{success_knowledge}\n\n[피해야 할 실패 사례]\n{failure_knowledge}"
 
-        success_case_knowledge = rag_search(
-            query=f"{target_name} 타겟 메시지 성공 사례",
-            source_type='성공 사례'
-        )
-
-        feedback_instructions = ""
-        feedback_section = ""
-        if refine_feedback:
+    # 시나리오 1: 마케터의 refine 요청 처리 (항상 전체 재작성)
+    if refine_feedback:
+        print("--- 실행 모드: 마케터 피드백 기반 전체 재작업 ---")
+        final_drafts = []
+        for persona in target_personas:
             feedback_instructions = "아래 마케터 피드백을 반영해 수정하여 작성하세요."
             feedback_section = f"마케터 피드백: {refine_feedback.get('details', '없음')}"
-        elif validator_feedback:
-            feedback_instructions = "아래 수정 피드백을 반영해 메시지를 다시 작성하세요."
-            feedback_section = f"수정 피드백: {validator_feedback.get('details', '없음')}"
+            rag_knowledge = get_rag_knowledge_for_persona(persona['target_name'])
+            
+            response = chain.invoke({
+                "feedback_instructions": feedback_instructions, "feedback_section": feedback_section,
+                "target_name": persona['target_name'], "target_features": persona['target_features'],
+                "core_benefit": core_benefit_text, "columns": columns_for_prompt, "source_urls": source_urls_str,
+                "rag_knowledge": rag_knowledge
+            })
+            final_drafts.append({
+                "target_group_index": persona['target_group_index'], "target_name": persona['target_name'],
+                "message_drafts": response.get("drafts", [])
+            })
+        return {"messages_drafts": final_drafts, "rework_count": 0}
 
-        response = chain.invoke({
-            "feedback_instructions": feedback_instructions,
-            "target_name": target_name,
-            "target_features": target_features,
-            "core_benefit": core_benefit_text,   
-            "columns": columns_for_prompt,
-            "source_urls": source_urls_str,
-            "rag_knowledge": success_case_knowledge,
-            "feedback_section": feedback_section
-        })
+    # 시나리오 2 & 3: 검증 결과에 따른 재작업 또는 초기 생성
+    is_rework = False
+    personas_to_rework = set()
+    feedback_per_persona = {}
 
-        messages_drafts.append({
-            "target_group_index": persona['target_group_index'],
-            "target_name": target_name,
-            "message_drafts": response.get("drafts", [])
-        })
+    if validation_reports:
+        for report in validation_reports:
+            if report.get('policy_compliance') == 'FAIL' or report.get('spam_risk_score', 0) > 70:
+                is_rework = True
+                group_index = report['target_group_index']
+                draft_index = report['message_draft_index']
+                feedback = report.get('recommended_action', '피드백 없음')
+                
+                personas_to_rework.add(group_index)
+                if group_index not in feedback_per_persona:
+                    feedback_per_persona[group_index] = []
+                feedback_per_persona[group_index].append(f"초안 {draft_index}: {feedback}")
 
-    return {
-        "messages_drafts": messages_drafts,
-        "rework_count": rework_count + 1 if validator_feedback else rework_count
-    }
+    if not is_rework:
+        # --- 시나리오 2: 초기 생성 ---
+        print("--- 실행 모드: 초기 생성 ---")
+        initial_drafts = []
+        for persona in target_personas:
+            rag_knowledge = get_rag_knowledge_for_persona(persona['target_name'])
+            response = chain.invoke({
+                "feedback_instructions": "", "feedback_section": "",
+                "target_name": persona['target_name'], "target_features": persona['target_features'],
+                "core_benefit": core_benefit_text, "columns": columns_for_prompt, "source_urls": source_urls_str,
+                "rag_knowledge": rag_knowledge
+            })
+            initial_drafts.append({
+                "target_group_index": persona['target_group_index'], "target_name": persona['target_name'],
+                "message_drafts": response.get("drafts", [])
+            })
+        return {"messages_drafts": initial_drafts, "rework_count": rework_count}
+    else:
+        # --- 시나리오 3: 부분 재작업 ---
+        print(f"--- 실행 모드: 부분 재작업 (대상 페르소나: {list(personas_to_rework)}) ---")
+        previous_drafts = state.get('messages_drafts', [])
+        final_drafts = []
+        
+        persona_map = {p['target_group_index']: p for p in target_personas}
+        previous_drafts_map = {d['target_group_index']: d for d in previous_drafts}
+
+        for group_index in sorted(persona_map.keys()):
+            persona = persona_map[group_index]
+            
+            if group_index in personas_to_rework:
+                print(f"재작업 실행: 타겟 그룹 {group_index} (시도 횟수: {rework_count + 1})")
+                all_feedback_for_persona = "\n".join(feedback_per_persona[group_index])
+                
+                # 재작업 횟수에 따라 피드백 지시사항 강화
+                if rework_count > 0:
+                    feedback_instructions = "이전 수정 요청이 제대로 반영되지 않았습니다. 아래 피드백을 **반드시 엄격하게 준수하여** 메시지를 **전면적으로 재작성**하세요."
+                else:
+                    feedback_instructions = "아래 수정 피드백을 반영해 메시지를 다시 작성하세요."
+
+                feedback_section = f"수정 피드백:\n{all_feedback_for_persona}"
+                rag_knowledge = get_rag_knowledge_for_persona(persona['target_name'])
+                
+                response = chain.invoke({
+                    "feedback_instructions": feedback_instructions, "feedback_section": feedback_section,
+                    "target_name": persona['target_name'], "target_features": persona['target_features'],
+                    "core_benefit": core_benefit_text, "columns": columns_for_prompt, "source_urls": source_urls_str,
+                    "rag_knowledge": rag_knowledge
+                })
+                final_drafts.append({
+                    "target_group_index": group_index, "target_name": persona['target_name'],
+                    "message_drafts": response.get("drafts", [])
+                })
+            else:
+                print(f"초안 유지: 타겟 그룹 {group_index}")
+                if group_index in previous_drafts_map:
+                    final_drafts.append(previous_drafts_map[group_index])
+        
+        return {"messages_drafts": final_drafts, "rework_count": rework_count + 1}
 
 def run_validator_agent(state: CampaignState) -> Dict:
     """
@@ -366,10 +405,11 @@ def run_validator_agent(state: CampaignState) -> Dict:
         3.  **개선 의견:** 실제 발송 전 수정이 필요한 부분을 명확히 제시.
 
         결과는 반드시 아래 JSON 형식의 단일 객체로 반환해야 합니다.
+        'policy_compliance'가 'FAIL'일 경우, 'review_summary'는 반드시 "위반 사유: [인용문]" 으로 시작해야 하며, RAG 지식에서 위반된 정책의 핵심 내용을 정확히 인용해야 합니다.
         {{
             "spam_risk_score": <0-100 사이의 정수>,
             "policy_compliance": "<'PASS' 또는 'FAIL'>",
-            "review_summary": "<검토 요약>",
+            "review_summary": "<(FAIL 시) 위반 사유: [인용문]을 포함한 검토 요약>",
             "recommended_action": "<구체적인 개선 제안 또는 '없음'>"
         }}
         """),
@@ -390,8 +430,6 @@ def run_validator_agent(state: CampaignState) -> Dict:
     chain = prompt | llm | json_parser
 
     validation_reports = []
-    needs_rework = False
-    validator_feedback = {"reason": "초안 메시지 검증 결과, 수정이 필요합니다.", "details": []}
 
     # RAG Tool 호출: 스팸/광고 정책을 한 번만 검색
     spam_policy_knowledge = rag_search(query="메시지 스팸/광고 정책", source_type='스팸/광고 정책')
@@ -409,15 +447,6 @@ def run_validator_agent(state: CampaignState) -> Dict:
                 "rag_knowledge": spam_policy_knowledge
             })
 
-            # 검증 실패 조건 확인
-            if report.get('policy_compliance') == 'FAIL' or report.get('spam_risk_score', 0) > 70:
-                needs_rework = True
-                feedback_detail = (
-                    f"타겟 '{target_name}'의 메시지 초안 {draft['message_draft_index']}: "
-                    f"{report.get('recommended_action', '피드백 없음')}"
-                )
-                validator_feedback['details'].append(feedback_detail)
-
             # 전체 리포트 저장
             report['target_group_index'] = target_group_drafts['target_group_index']
             report['message_draft_index'] = draft['message_draft_index']
@@ -425,12 +454,9 @@ def run_validator_agent(state: CampaignState) -> Dict:
 
     print(f"Validator Agent - 생성된 검증 리포트: {validation_reports}")
 
-    if needs_rework:
-        # 피드백의 details를 하나의 문자열로 합침
-        feedback_str = "\n".join(validator_feedback['details'])
-        return {"validation_reports": validation_reports, "validator_feedback": {"details": feedback_str}}
-    else:
-        return {"validation_reports": validation_reports, "validator_feedback": None}
+    # 에이전트는 이제 리포트만 반환하고, 재작업 결정은 decide_next_step에서 처리합니다.
+    # 이전 피드백 상태를 확실히 지우기 위해 validator_feedback을 None으로 설정합니다.
+    return {"validation_reports": validation_reports, "validator_feedback": None}
 
 
 def run_formatter_agent(state: CampaignState) -> Dict:
@@ -494,18 +520,19 @@ def decide_next_step(state: CampaignState) -> str:
     print("---" + " decide_next_step 실행 중 ---")
     rework_count = state.get('rework_count', 0)
     validation_reports = state.get('validation_reports', [])
-    validator_feedback = state.get('validator_feedback', None)
 
-    # 최대 재시도 횟수 (1회) 초과 시 강제 종료
-    if rework_count >= 1:
+    # 최대 재시도 횟수 (2회) 초과 시 강제 종료
+    if rework_count >= 2:
         print(f"재시도 횟수 {rework_count}회 초과. Formatter로 이동하여 강제 종료.")
         return "formatter"
 
-    # 검증 실패 조건 확인 (예: policy_compliance == 'FAIL' 또는 스팸 점수 기준 초과)
-    # 하나라도 FAIL이거나 스팸 점수가 높으면 재작업 필요
+    # validation_reports를 직접 검사하여 재작업 필요 여부 확인
     needs_rework = False
-    if validator_feedback and validator_feedback.get('details'):
-        needs_rework = True
+    if validation_reports:
+        for report in validation_reports:
+            if report.get('policy_compliance') == 'FAIL' or report.get('spam_risk_score', 0) > 70:
+                needs_rework = True
+                break  # 하나라도 실패하면 즉시 재작업 결정
 
     if needs_rework:
         print(f"검증 실패. Messaging Agent로 루프백하여 메시지 재생성 시도. 현재 재시도 횟수: {rework_count}")
