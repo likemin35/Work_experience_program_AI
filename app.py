@@ -1,15 +1,27 @@
 import json
-from flask import Flask, request, jsonify
-from openai import OpenAI
-from create_message import generate_messages
-from upload_pdf import extract_text_from_pdf, parse_promotion_fields
 import traceback
+
+from flask import Flask, jsonify, request
+from openai import OpenAI
+
+from create_message import generate_messages
+from strategy_agent import CampaignStrategyAgent
+from upload_pdf import extract_text_from_pdf, parse_promotion_fields
 
 app = Flask(__name__)
 
 pdf_client = OpenAI()
 message_client = OpenAI()
 cluster_client = OpenAI()
+strategy_agent = CampaignStrategyAgent(client=OpenAI())
+
+
+def _clean_json_block(text: str):
+    content = (text or "").strip()
+    if content.startswith("```"):
+        content = content.replace("```json", "").replace("```", "").strip()
+    return content
+
 
 @app.route("/generate-messages", methods=["POST"])
 def generate_messages_api():
@@ -18,9 +30,12 @@ def generate_messages_api():
         return jsonify({"error": "Invalid JSON input"}), 400
 
     try:
-        result = generate_messages(data, client=message_client)
+        result = generate_messages(
+            data,
+            client=message_client,
+            strategy_agent=strategy_agent,
+        )
         return jsonify(result), 200
-
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -38,76 +53,71 @@ def cluster_customers():
     if not campaign or not customers:
         return jsonify({"error": "campaign or customers missing"}), 400
 
-    prompt = f"""
-너는 통신사 마케팅 전문가다.
+    clustering_strategy = strategy_agent.decide_clustering_strategy(
+        campaign=campaign,
+        customers=customers,
+    )
 
-[캠페인 정보]
-- 목적: {campaign.get('purpose')}
-- 핵심 혜택: {campaign.get('coreBenefitText')}
-
-아래 고객들을 이 캠페인 기준으로
-의미 있는 타겟 그룹으로 분류하라.
-
-규칙:
-- 그룹 개수는 네가 판단
-- 고객이 모두 다르면 1명 = 1그룹 허용
-- 각 그룹마다
-  - clusterName
-  - clusterDescription
-  - customerIds 포함
-
-[고객 목록]
-""" + "\n".join(
-        f"- ({c['customerId']}) {c['description']}"
+    customer_lines = "\n".join(
+        f"- ({c.get('customerId')}) {c.get('description', '')}"
         for c in customers
-    ) + """
+    )
 
-JSON 형식으로만 출력하라.
+    prompt = f"""
+You are a telecom CRM segmentation strategist.
+Group customers for the campaign.
+
+[Campaign]
+title: {campaign.get("title")}
+benefit: {campaign.get("coreBenefitText")}
+
+[Strategy from agent]
+mode: {clustering_strategy.get("strategy_mode")}
+reason: {clustering_strategy.get("reason")}
+guidance: {clustering_strategy.get("segmentation_guidance")}
+reference promotion ids: {clustering_strategy.get("history_references")}
+
+Rules:
+- Choose a reasonable number of groups.
+- If users are all very different, single-user groups are allowed.
+- Return JSON only in this shape:
+{{
+  "clusters": [
+    {{
+      "clusterName": "string",
+      "clusterDescription": "string",
+      "customerIds": ["1", "2"]
+    }}
+  ]
+}}
+
+[Customers]
+{customer_lines}
 """
 
     try:
         response = cluster_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=0.2,
+            response_format={"type": "json_object"},
         )
 
-        content = response.choices[0].message.content.strip()
+        parsed = json.loads(_clean_json_block(response.choices[0].message.content))
+        clusters = parsed.get("clusters")
+        if not isinstance(clusters, list):
+            return jsonify({"error": "Invalid cluster response format"}), 500
 
-        if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
-
-        parsed = json.loads(content)
-
-        # ✅ 핵심 수정: list / dict 모두 처리
-        if isinstance(parsed, list):
-            clusters = parsed
-        elif isinstance(parsed, dict):
-            if "clusters" in parsed:
-                clusters = parsed["clusters"]
-            elif "targetGroups" in parsed:
-                clusters = parsed["targetGroups"]
-            else:
-                return jsonify({"error": "Invalid cluster response format"}), 500
-        else:
-            return jsonify({"error": "Invalid cluster response type"}), 500
-
-        # customerIds 문자열 보정
         for cluster in clusters:
-            cluster["customerIds"] = [
-                str(cid) for cid in cluster.get("customerIds", [])
-            ]
+            cluster["customerIds"] = [str(cid) for cid in cluster.get("customerIds", [])]
 
-        # ✅ Spring이 기대하는 형태로 통일
         return jsonify({
-            "clusters": clusters
+            "clusters": clusters,
+            "strategy_meta": clustering_strategy,
         }), 200
-
     except Exception:
         traceback.print_exc()
         return jsonify({"error": "cluster parsing failed"}), 500
-
-
 
 
 @app.route("/ai/campaign/extract", methods=["POST"])
@@ -118,14 +128,10 @@ def extract_campaign():
 
         file = request.files["file"]
         file_bytes = file.read()
-
         pdf_text = extract_text_from_pdf(file_bytes)
-
         result = parse_promotion_fields(pdf_text, client=pdf_client)
-
         return jsonify(result), 200
-
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 

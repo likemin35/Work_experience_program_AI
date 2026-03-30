@@ -1,24 +1,47 @@
-import os
 import json
-from typing import Dict
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from typing import Any, Dict, Optional
 
 
-def generate_messages(input_data: Dict, client):
+def _load_json(text: str) -> Dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+    return json.loads(cleaned)
+
+
+def generate_messages(
+    input_data: Dict[str, Any],
+    client,
+    strategy_agent=None,
+):
     segments = input_data.get("segments", [])
     core_benefit_text = input_data.get("coreBenefitText", "")
-    campaign_title = input_data.get("title", "프로모션")
-    source_Url = input_data.get("sourceUrl", "")
+    campaign_title = input_data.get("title", "Promotion")
+    source_url = input_data.get("sourceUrl", "")
 
-    llm = ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.3,
-        api_key=os.getenv("OPENAI_API_KEY")
-    )
+    results = []
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """
+    for idx, segment in enumerate(segments):
+        target_segment = segment.get("target_segment", f"segment-{idx}")
+        target_features = segment.get("segment_features", "")
+
+        message_strategy: Optional[Dict[str, Any]] = None
+        if strategy_agent is not None:
+            message_strategy = strategy_agent.decide_message_strategy(
+                campaign={
+                    "title": campaign_title,
+                    "coreBenefitText": core_benefit_text,
+                },
+                segment_name=target_segment,
+                segment_features=target_features,
+            )
+
+        strategy_mode = (message_strategy or {}).get("message_mode", "new")
+        strategy_reason = (message_strategy or {}).get("reason", "")
+        strategy_guidance = (message_strategy or {}).get("message_guidance", "")
+        strategy_refs = (message_strategy or {}).get("history_references", [])
+
+        system_prompt = """
 당신은 SK텔레콤, KT, 카드사 등에서
 장기 이용 고객에게 발송되는
 CRM 안내 문자를 작성하는 실무 카피라이터다.
@@ -43,11 +66,12 @@ CRM 안내 문자를 작성하는 실무 카피라이터다.
 차분하고 신뢰감 있는 톤으로 작성한다.
 
 출력은 반드시 JSON만 허용한다.
-"""),
-        ("human", """
+"""
+
+        human_prompt = f"""
 아래 정보를 바탕으로
 통신사/금융사 CRM 안내 문자 1건을 작성하세요.
-         
+
 메시지 구성:
 1. (광고) 헤더
 2. 개인화 인사 + 안내 사유
@@ -57,23 +81,24 @@ CRM 안내 문자를 작성하는 실무 카피라이터다.
 6. 추가 안내 문장
 7. ■ 문의처
 8. 무료 수신거부 문구
-     
+
 중요 규칙 (반드시 지킬 것):
-- {title} 값은 임의로 수정하거나 요약하지 말고,
+- {campaign_title} 값은 임의로 수정하거나 요약하지 말고,
   입력된 문자열을 그대로 메시지에 포함할 것
-- {sourceUrl} 값은 반드시 메시지에 실제 URL 문자열 그대로 출력할 것
+- {source_url} 값은 반드시 메시지에 실제 URL 문자열 그대로 출력할 것
 - "[링크]", "[URL]" 같은 대체 표현 사용 금지
 - 입력값이 비어 있지 않은 경우, 누락은 오류로 간주
 
 작성 규칙:
 - 첫 줄은 반드시 다음 형식과 정확히 일치해야 함:
-  (광고) {title} 안내
+  (광고) {campaign_title} 안내
 - 혜택은 객관적 사실 위주로 서술
 - 문장은 짧고 단정하게 작성
+
 CTA 규칙:
 - 아래 문장을 그대로 사용할 것 (문구 수정 금지)
-▶ 자세히 보기: {sourceUrl}
-     
+▶ 자세히 보기: {source_url}
+
 반드시 아래 문장을 메시지 초반(2~3번째 줄)에 포함할 것:
 [세그먼트 반영 문장 작성 규칙]
 - 타겟 세그먼트 설명을 바탕으로
@@ -85,59 +110,53 @@ CTA 규칙:
 - 장기 이용 고객 → "오랜 기간 함께해 주신 고객님께 감사의 의미로 준비했습니다."
 - 데이터 헤비 유저 → "데이터 사용이 잦은 고객님께 실질적인 혜택이 될 수 있도록 구성했습니다."
 - 콘텐츠 소비형 → "영상·콘텐츠 이용이 잦은 고객님께 유용한 혜택을 안내드립니다."
-         
+
 혜택 문단 규칙:
 - 반드시 여러 줄 목록 형태로 작성할 것
 - 각 혜택은 "-" 로 시작하는 한 줄로 분리할 것
 - 한 줄에 여러 혜택을 나열하는 문장은 금지
 
-     
 입력 정보:
-프로모션명: {title}
-혜택 설명: {coreBenefitText}
-타겟 세그먼트 설명: {targetFeatures}
-프로모션 url : {sourceUrl}
+프로모션명: {campaign_title}
+혜택 설명: {core_benefit_text}
+타겟 세그먼트 설명: {target_features}
+프로모션 url : {source_url}
 
 출력 형식:
 {{
   "message_text": "..."
 }}
-""")
-    ])
+"""
 
-    chain = prompt | llm
-    results = []
-
-    for idx, segment in enumerate(segments):
-        raw = chain.invoke({
-            "title": campaign_title,
-            "coreBenefitText": core_benefit_text,
-            "sourceUrl": source_Url,
-            "targetSegment": segment["target_segment"],
-            "targetFeatures": segment["segment_features"]
-        }).content
-
-        content = raw.strip()
-        if content.startswith("```"):
-            content = content.replace("```json", "").replace("```", "").strip()
-
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON from LLM:\n{raw}") from e
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": human_prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        )
+        parsed = _load_json(response.choices[0].message.content or "{}")
 
         results.append({
             "target_group_index": idx,
-            "target_name": segment["target_segment"],
+            "target_name": target_segment,
+            "target_features": target_features,
             "message_drafts": [
                 {
                     "message_draft_index": 1,
-                    "message_text": parsed["message_text"]
+                    "message_text": parsed.get("message_text", ""),
                 }
-            ]
+            ],
+            "strategy_meta": {
+                "mode": strategy_mode,
+                "reason": strategy_reason,
+                "references": strategy_refs,
+            },
         })
 
     return {
         "title": campaign_title,
-        "messages": results
+        "messages": results,
     }
