@@ -14,6 +14,9 @@ class HistoricalPromotion:
     participation_rate: Optional[float] = None
     conversion_rate: Optional[float] = None
     click_through_rate: Optional[float] = None
+    expected_participation_rate: Optional[float] = None
+    expected_conversion_rate: Optional[float] = None
+    expected_click_through_rate: Optional[float] = None
     message_example: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -54,6 +57,9 @@ class MockPromotionHistoryProvider(PromotionHistoryProvider):
                 participation_rate=0.34,
                 conversion_rate=0.14,
                 click_through_rate=0.29,
+                expected_participation_rate=0.30,
+                expected_conversion_rate=0.12,
+                expected_click_through_rate=0.26,
                 message_example="For customers who stream often, we prepared extra weekend data.",
             ),
             HistoricalPromotion(
@@ -64,6 +70,9 @@ class MockPromotionHistoryProvider(PromotionHistoryProvider):
                 participation_rate=0.18,
                 conversion_rate=0.09,
                 click_through_rate=0.17,
+                expected_participation_rate=0.20,
+                expected_conversion_rate=0.10,
+                expected_click_through_rate=0.18,
                 message_example="We prepared a simple comeback benefit just for returning customers.",
             ),
         ]
@@ -156,6 +165,9 @@ class WebPlatformPromotionHistoryProvider(PromotionHistoryProvider):
                 participation_rate=0.37,
                 conversion_rate=0.16,
                 click_through_rate=0.33,
+                expected_participation_rate=0.35,
+                expected_conversion_rate=0.15,
+                expected_click_through_rate=0.31,
                 message_example="데이터 사용량이 높은 고객님께 업그레이드 혜택을 준비했습니다.",
             ),
             HistoricalPromotion(
@@ -166,6 +178,9 @@ class WebPlatformPromotionHistoryProvider(PromotionHistoryProvider):
                 participation_rate=0.22,
                 conversion_rate=0.11,
                 click_through_rate=0.19,
+                expected_participation_rate=0.25,
+                expected_conversion_rate=0.12,
+                expected_click_through_rate=0.21,
                 message_example="최근 이용이 뜸했던 고객님께 복귀 혜택을 안내드립니다.",
             ),
             HistoricalPromotion(
@@ -176,6 +191,9 @@ class WebPlatformPromotionHistoryProvider(PromotionHistoryProvider):
                 participation_rate=0.29,
                 conversion_rate=0.13,
                 click_through_rate=0.24,
+                expected_participation_rate=0.28,
+                expected_conversion_rate=0.12,
+                expected_click_through_rate=0.23,
                 message_example="가족 결합 시 추가 혜택을 받을 수 있는 프로모션입니다.",
             ),
         ]
@@ -256,6 +274,15 @@ class NotionPromotionHistoryProvider(PromotionHistoryProvider):
             participation_rate=_extract_number(props, _env("NOTION_PROP_PARTICIPATION_RATE", "participation_rate")),
             conversion_rate=_extract_number(props, _env("NOTION_PROP_CONVERSION_RATE", "conversion_rate")),
             click_through_rate=_extract_number(props, _env("NOTION_PROP_CLICK_RATE", "click_through_rate")),
+            expected_participation_rate=_extract_number(
+                props, _env("NOTION_PROP_EXPECTED_PARTICIPATION_RATE", "expected_participation_rate")
+            ),
+            expected_conversion_rate=_extract_number(
+                props, _env("NOTION_PROP_EXPECTED_CONVERSION_RATE", "expected_conversion_rate")
+            ),
+            expected_click_through_rate=_extract_number(
+                props, _env("NOTION_PROP_EXPECTED_CLICK_RATE", "expected_click_through_rate")
+            ),
             message_example=message_example,
         )
 
@@ -307,6 +334,9 @@ def _to_promotion(item: Dict[str, Any]) -> HistoricalPromotion:
         participation_rate=_to_float(item.get("participation_rate")),
         conversion_rate=_to_float(item.get("conversion_rate")),
         click_through_rate=_to_float(item.get("click_through_rate")),
+        expected_participation_rate=_to_float(item.get("expected_participation_rate")),
+        expected_conversion_rate=_to_float(item.get("expected_conversion_rate")),
+        expected_click_through_rate=_to_float(item.get("expected_click_through_rate")),
         message_example=item.get("message_example"),
     )
 

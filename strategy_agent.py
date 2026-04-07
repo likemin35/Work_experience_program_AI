@@ -1,18 +1,19 @@
-import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
-from history_provider import build_history_provider
+from history_provider import HistoricalPromotion, build_history_provider
 
 
 class CampaignStrategyAgent:
     """
-    Agent-like orchestrator:
-    1) fetches similar historical promotions via provider (MCP extension point)
-    2) asks LLM to decide whether to reuse past strategy or create a new one
+    Strategy agent:
+    - fetch historical promotions from MCP/Web provider
+    - compare actual metrics vs expected metrics
+    - decide strategy mode: reuse / hybrid / new
     """
 
-    def __init__(self, client):
+    def __init__(self, client=None):
+        # client is kept for backward compatibility, but strategy is rule-based now.
         self.client = client
         self.history_provider = build_history_provider()
 
@@ -21,19 +22,14 @@ class CampaignStrategyAgent:
         campaign: Dict[str, Any],
         customers: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        customer_preview = "\n".join(
-            f"- ({c.get('customerId')}) {c.get('description', '')[:180]}"
-            for c in customers[:25]
-        )
         history = self.history_provider.search_similar_promotions(
             campaign=campaign,
             query_text=f"{campaign.get('title', '')}\n{campaign.get('coreBenefitText', '')}",
             limit=5,
         )
-        ranked = self._rank_by_performance(history)
-        history_json = json.dumps([h.to_dict() for h in ranked], ensure_ascii=False)
+        ranked = self._rank_by_actual_performance(history)
 
-        if not history:
+        if not ranked:
             return {
                 "strategy_mode": "new",
                 "reason": "No historical promotions were available from MCP/history source.",
@@ -41,34 +37,19 @@ class CampaignStrategyAgent:
                 "history_references": [],
             }
 
-        prompt = f"""
-You are a CRM segmentation strategist.
-Decide whether we should reuse previous segmentation logic or design a new one.
+        mode, reason, refs = self._decide_mode_with_reason(ranked)
+        guidance = {
+            "reuse": "Reuse historical grouping pattern and prioritize segments that previously outperformed expected KPI.",
+            "hybrid": "Partially reuse high-performing segment rules, but adapt boundaries/features for current customers.",
+            "new": "Design a new clustering strategy from current campaign + customer profile, avoiding underperforming historical patterns.",
+        }[mode]
 
-[Campaign]
-title: {campaign.get("title")}
-benefit: {campaign.get("coreBenefitText")}
-
-[Customer preview]
-{customer_preview}
-
-[Historical promotions]
-{history_json}
-
-Return JSON only:
-{{
-  "strategy_mode": "reuse" | "hybrid" | "new",
-  "reason": "short rationale",
-  "segmentation_guidance": "practical instruction for clustering prompt",
-  "history_references": ["promotion_id", "..."]
-}}
-"""
-        return self._safe_json_completion(prompt, fallback={
-            "strategy_mode": "hybrid",
-            "reason": "Fallback strategy due to parsing failure.",
-            "segmentation_guidance": "Use current customer features, but keep group styles close to top-performing historical campaigns.",
-            "history_references": [h.promotion_id for h in ranked[:2]],
-        })
+        return {
+            "strategy_mode": mode,
+            "reason": reason,
+            "segmentation_guidance": guidance,
+            "history_references": refs,
+        }
 
     def decide_message_strategy(
         self,
@@ -81,10 +62,9 @@ Return JSON only:
             query_text=f"{campaign.get('title', '')}\n{segment_name}\n{segment_features}",
             limit=5,
         )
-        ranked = self._rank_by_performance(history)
-        history_json = json.dumps([h.to_dict() for h in ranked], ensure_ascii=False)
+        ranked = self._rank_by_actual_performance(history)
 
-        if not history:
+        if not ranked:
             return {
                 "message_mode": "new",
                 "reason": "No historical message performance data was found.",
@@ -92,53 +72,77 @@ Return JSON only:
                 "history_references": [],
             }
 
-        prompt = f"""
-You are a CRM copy strategist.
-Decide if this segment should reuse message tone/pattern from historical promotions.
+        mode, reason, refs = self._decide_mode_with_reason(ranked)
+        guidance = {
+            "reuse": "Reuse tone/structure from historically over-performing messages and adapt product facts only.",
+            "hybrid": "Keep proven opening/CTA structure, but rewrite segment-specific body for this campaign.",
+            "new": "Create a new message concept because historical performance underperformed expected KPI.",
+        }[mode]
 
-[Campaign]
-title: {campaign.get("title")}
-benefit: {campaign.get("coreBenefitText")}
+        return {
+            "message_mode": mode,
+            "reason": reason,
+            "message_guidance": guidance,
+            "history_references": refs,
+        }
 
-[Segment]
-name: {segment_name}
-features: {segment_features}
+    def _decide_mode_with_reason(
+        self,
+        ranked: List[HistoricalPromotion],
+    ) -> Tuple[str, str, List[str]]:
+        rows = []
+        for item in ranked:
+            actual, expected = self._scores(item)
+            if expected is None:
+                continue
+            gap = actual - expected
+            rows.append((item, actual, expected, gap))
 
-[Historical promotions]
-{history_json}
-
-Return JSON only:
-{{
-  "message_mode": "reuse" | "hybrid" | "new",
-  "reason": "short rationale",
-  "message_guidance": "practical writing instruction",
-  "history_references": ["promotion_id", "..."]
-}}
-"""
-        return self._safe_json_completion(prompt, fallback={
-            "message_mode": "hybrid",
-            "reason": "Fallback strategy due to parsing failure.",
-            "message_guidance": "Keep reliable wording from high-performing examples and adapt to current segment features.",
-            "history_references": [h.promotion_id for h in ranked[:2]],
-        })
-
-    def _safe_json_completion(self, prompt: str, fallback: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={"type": "json_object"},
+        # If expected metrics are missing, keep partial reuse as safe default.
+        if not rows:
+            refs = [h.promotion_id for h in ranked[:2]]
+            return (
+                "hybrid",
+                "Expected KPI values were missing in history, so partially reusing proven patterns.",
+                refs,
             )
-            content = (response.choices[0].message.content or "").strip()
-            return json.loads(content)
-        except Exception:
-            return fallback
 
-    def _rank_by_performance(self, history: List[Any]) -> List[Any]:
-        return sorted(history, key=self._score_history, reverse=True)
+        avg_gap = sum(r[3] for r in rows) / len(rows)
+        over_threshold = _to_float_env("KPI_OVER_GAP_THRESHOLD", 0.010)
+        under_threshold = _to_float_env("KPI_UNDER_GAP_THRESHOLD", -0.010)
+        neutral_band = _to_float_env("KPI_NEUTRAL_BAND", 0.006)
 
-    def _score_history(self, item: Any) -> float:
+        over_refs = [r[0].promotion_id for r in rows if r[3] >= neutral_band][:3]
+        under_refs = [r[0].promotion_id for r in rows if r[3] <= -neutral_band][:3]
+        top_refs = [h.promotion_id for h in ranked[:3]]
+
+        if avg_gap >= over_threshold:
+            refs = over_refs or top_refs[:2]
+            reason = (
+                f"Historical campaigns exceeded expected KPI on average "
+                f"(avg_gap={avg_gap:.4f}), so reuse strategy is recommended."
+            )
+            return "reuse", reason, refs
+
+        if avg_gap <= under_threshold:
+            refs = under_refs or top_refs[:2]
+            reason = (
+                f"Historical campaigns underperformed expected KPI on average "
+                f"(avg_gap={avg_gap:.4f}), so a new strategy is recommended."
+            )
+            return "new", reason, refs
+
+        refs = top_refs[:2]
+        reason = (
+            f"Historical campaigns were near expected KPI "
+            f"(avg_gap={avg_gap:.4f}), so partially reusing strategy is recommended."
+        )
+        return "hybrid", reason, refs
+
+    def _rank_by_actual_performance(self, history: List[HistoricalPromotion]) -> List[HistoricalPromotion]:
+        return sorted(history, key=self._actual_score, reverse=True)
+
+    def _actual_score(self, item: HistoricalPromotion) -> float:
         ctr_weight = _to_float_env("WEIGHT_CLICK_RATE", 0.5)
         participation_weight = _to_float_env("WEIGHT_PARTICIPATION_RATE", 0.3)
         conversion_weight = _to_float_env("WEIGHT_CONVERSION_RATE", 0.2)
@@ -146,8 +150,28 @@ Return JSON only:
         ctr = float(item.click_through_rate or 0.0)
         participation = float(item.participation_rate or 0.0)
         conversion = float(item.conversion_rate or 0.0)
-
         return (ctr * ctr_weight) + (participation * participation_weight) + (conversion * conversion_weight)
+
+    def _expected_score(self, item: HistoricalPromotion) -> float:
+        ctr_weight = _to_float_env("WEIGHT_CLICK_RATE", 0.5)
+        participation_weight = _to_float_env("WEIGHT_PARTICIPATION_RATE", 0.3)
+        conversion_weight = _to_float_env("WEIGHT_CONVERSION_RATE", 0.2)
+
+        ctr = float(item.expected_click_through_rate or 0.0)
+        participation = float(item.expected_participation_rate or 0.0)
+        conversion = float(item.expected_conversion_rate or 0.0)
+        return (ctr * ctr_weight) + (participation * participation_weight) + (conversion * conversion_weight)
+
+    def _scores(self, item: HistoricalPromotion) -> Tuple[float, Any]:
+        actual = self._actual_score(item)
+        has_expected = (
+            item.expected_participation_rate is not None
+            or item.expected_conversion_rate is not None
+            or item.expected_click_through_rate is not None
+        )
+        if not has_expected:
+            return actual, None
+        return actual, self._expected_score(item)
 
 
 def _to_float_env(name: str, default: float) -> float:
