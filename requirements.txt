@@ -1,4 +1,6 @@
-flask
+fastapi
+uvicorn
+python-multipart
 openai
 langchain
 langchain-openai

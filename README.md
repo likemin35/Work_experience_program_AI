@@ -194,7 +194,7 @@ Agent는 직접 DB를 읽지 않고 `history_provider.py`를 통해 과거 프�
 ## 파일 구성
 
 - `app.py`
-  - Flask 엔드포인트 진입점
+  - FastAPI 엔드포인트 진입점
   - Strategy Agent 생성 및 API 연결
 - `strategy_agent.py`
   - 전략 판단 Agent 본체
@@ -264,7 +264,7 @@ WEIGHT_CONVERSION_RATE=0.2
 ### 3. 서버 실행
 
 ```bash
-python app.py
+uvicorn app:app --host 0.0.0.0 --port 5000
 ```
 
 기본 포트는 `5000`입니다.
@@ -272,11 +272,12 @@ python app.py
 ## 기술 스택
 
 - Python 3.11
-- Flask
+- FastAPI
 - OpenAI API
 - LangChain
 - pdfplumber
 - requests
+- uvicorn
 - Docker
 - Azure Container Apps
 

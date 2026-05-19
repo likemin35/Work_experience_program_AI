@@ -1,14 +1,17 @@
 import json
 import traceback
+from typing import Any, Dict, List, Optional
 
-from flask import Flask, jsonify, request
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse, PlainTextResponse
 from openai import OpenAI
+from pydantic import BaseModel
 
 from create_message import generate_messages
 from strategy_agent import CampaignStrategyAgent
 from upload_pdf import extract_text_from_pdf, parse_promotion_fields
 
-app = Flask(__name__)
+app = FastAPI(title="Message AI Server")
 
 pdf_client = OpenAI()
 message_client = OpenAI()
@@ -16,18 +19,36 @@ cluster_client = OpenAI()
 strategy_agent = CampaignStrategyAgent(client=OpenAI())
 
 
-def _clean_json_block(text: str):
+class CampaignPayload(BaseModel):
+    title: Optional[str] = None
+    purpose: Optional[str] = None
+    coreBenefitText: Optional[str] = None
+
+
+class CustomerPayload(BaseModel):
+    customerId: str
+    description: str
+
+
+class ClusterCustomersRequest(BaseModel):
+    campaign: CampaignPayload
+    customers: List[CustomerPayload]
+
+
+def _clean_json_block(text: str) -> str:
     content = (text or "").strip()
     if content.startswith("```"):
         content = content.replace("```json", "").replace("```", "").strip()
     return content
 
 
-@app.route("/generate-messages", methods=["POST"])
-def generate_messages_api():
-    data = request.get_json()
+@app.post("/generate-messages")
+def generate_messages_api(data: Dict[str, Any]):
     if not data:
-        return jsonify({"error": "Invalid JSON input"}), 400
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid JSON input"},
+        )
 
     try:
         result = generate_messages(
@@ -35,23 +56,22 @@ def generate_messages_api():
             client=message_client,
             strategy_agent=strategy_agent,
         )
-        return jsonify(result), 200
+        return JSONResponse(status_code=200, content=result)
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.route("/cluster-customers", methods=["POST"])
-def cluster_customers():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid JSON input"}), 400
-
-    campaign = data.get("campaign")
-    customers = data.get("customers")
+@app.post("/cluster-customers")
+def cluster_customers(data: ClusterCustomersRequest):
+    campaign = data.campaign.model_dump(exclude_none=True)
+    customers = [customer.model_dump() for customer in data.customers]
 
     if not campaign or not customers:
-        return jsonify({"error": "campaign or customers missing"}), 400
+        return JSONResponse(
+            status_code=400,
+            content={"error": "campaign or customers missing"},
+        )
 
     clustering_strategy = strategy_agent.decide_clustering_strategy(
         campaign=campaign,
@@ -59,8 +79,8 @@ def cluster_customers():
     )
 
     customer_lines = "\n".join(
-        f"- ({c.get('customerId')}) {c.get('description', '')}"
-        for c in customers
+        f"- ({customer.get('customerId')}) {customer.get('description', '')}"
+        for customer in customers
     )
 
     prompt = f"""
@@ -103,43 +123,54 @@ Rules:
             response_format={"type": "json_object"},
         )
 
-        parsed = json.loads(_clean_json_block(response.choices[0].message.content))
+        parsed = json.loads(
+            _clean_json_block(response.choices[0].message.content)
+        )
         clusters = parsed.get("clusters")
         if not isinstance(clusters, list):
-            return jsonify({"error": "Invalid cluster response format"}), 500
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Invalid cluster response format"},
+            )
 
         for cluster in clusters:
-            cluster["customerIds"] = [str(cid) for cid in cluster.get("customerIds", [])]
+            cluster["customerIds"] = [
+                str(cid) for cid in cluster.get("customerIds", [])
+            ]
 
-        return jsonify({
-            "clusters": clusters,
-            "strategy_meta": clustering_strategy,
-        }), 200
+        return JSONResponse(
+            status_code=200,
+            content={
+                "clusters": clusters,
+                "strategy_meta": clustering_strategy,
+            },
+        )
     except Exception:
         traceback.print_exc()
-        return jsonify({"error": "cluster parsing failed"}), 500
+        return JSONResponse(
+            status_code=500,
+            content={"error": "cluster parsing failed"},
+        )
 
 
-@app.route("/ai/campaign/extract", methods=["POST"])
-def extract_campaign():
+@app.post("/ai/campaign/extract")
+async def extract_campaign(file: Optional[UploadFile] = File(default=None)):
     try:
-        if "file" not in request.files:
-            return jsonify({"error": "file missing"}), 400
+        if file is None:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "file missing"},
+            )
 
-        file = request.files["file"]
-        file_bytes = file.read()
+        file_bytes = await file.read()
         pdf_text = extract_text_from_pdf(file_bytes)
         result = parse_promotion_fields(pdf_text, client=pdf_client)
-        return jsonify(result), 200
+        return JSONResponse(status_code=200, content=result)
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.route("/")
+@app.get("/")
 def health_check():
-    return "AI Cluster Server running", 200
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    return PlainTextResponse("AI Cluster Server running", status_code=200)
